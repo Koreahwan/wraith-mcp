@@ -1,6 +1,6 @@
 # stealth-browser-use-mcp
 
-AI-native stealth browser MCP server for Claude Code.
+AI-native stealth browser MCP server for any MCP-compatible AI agent.
 
 Combines [Browser Use](https://github.com/browser-use/browser-use) (AI agent that understands pages visually) with [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) (Playwright fork with bot detection patches).
 
@@ -22,7 +22,10 @@ Patchright's Chromium is installed automatically on first use. To pre-install:
 patchright install chromium
 ```
 
-### Add to Claude Code
+### Connect to Your AI Agent
+
+<details>
+<summary><b>Claude Code</b></summary>
 
 ```bash
 claude mcp add stealth-browser -- stealth-browser-use-mcp
@@ -44,9 +47,72 @@ Or add to `.mcp.json`:
 }
 ```
 
+</details>
+
+<details>
+<summary><b>Cursor / Windsurf / VS Code (Copilot)</b></summary>
+
+Add to your MCP settings (`.cursor/mcp.json`, `.windsurf/mcp.json`, or VS Code MCP config):
+
+```json
+{
+  "mcpServers": {
+    "stealth-browser": {
+      "command": "stealth-browser-use-mcp",
+      "env": {
+        "ANTHROPIC_API_KEY": "your-api-key-here",
+        "HEADLESS": "true"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Cline / Roo Code</b></summary>
+
+Add via Cline MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "stealth-browser": {
+      "command": "stealth-browser-use-mcp",
+      "env": {
+        "ANTHROPIC_API_KEY": "your-api-key-here",
+        "HEADLESS": "true"
+      }
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>OpenCode / Codex / Other MCP Clients</b></summary>
+
+Any MCP client that supports stdio transport can connect:
+
+```bash
+stealth-browser-use-mcp
+```
+
+Set environment variables before launching:
+
+```bash
+export ANTHROPIC_API_KEY="your-api-key-here"
+export HEADLESS=true
+stealth-browser-use-mcp
+```
+
+</details>
+
 ### Use
 
-Tell Claude Code to use the stealth browser:
+Ask your AI agent to use the stealth browser:
 
 ```
 "Go to example.com and extract all article titles"
@@ -79,8 +145,8 @@ pip install 'stealth-browser-use-mcp[openai]'
 ## How It Works
 
 ```
-Claude Code  ->  MCP Server  ->  Browser Use Agent  ->  Patchright Chromium
- (your task)    (this project)   (AI navigation)      (stealth browser)
+AI Agent  ->  MCP Server (stdio)  ->  Browser Use Agent  ->  Patchright Chromium
+ (task)      (this project)          (AI navigation)       (stealth browser)
 ```
 
 1. You describe a task in natural language
@@ -93,6 +159,16 @@ Claude Code  ->  MCP Server  ->  Browser Use Agent  ->  Patchright Chromium
 - Playwright's Chromium is detected by Cloudflare, DataDome, etc.
 - This project uses AI vision — resilient to layout changes
 - Patchright patches CDP leaks — passes basic-to-medium bot detection
+
+## Compatibility
+
+Works with any AI agent that supports the [Model Context Protocol](https://modelcontextprotocol.io):
+
+- Claude Code, Claude Desktop
+- Cursor, Windsurf, VS Code (Copilot)
+- Cline, Roo Code, Continue
+- OpenCode, Codex CLI
+- Any MCP-compatible client (stdio transport)
 
 ## Security
 

@@ -1,12 +1,12 @@
 [project]
 name = "stealth-browser-use-mcp"
 version = "0.1.0"
-description = "AI-native stealth browser MCP server — Browser Use + Patchright"
+description = "AI-native stealth browser MCP server for any AI agent — Browser Use + Patchright"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "KH" }]
-keywords = ["mcp", "browser-use", "patchright", "stealth", "browser-automation", "ai-agent"]
+keywords = ["mcp", "browser-use", "patchright", "stealth", "browser-automation", "ai-agent", "claude", "cursor", "codex", "opencode", "windsurf", "cline"]
 classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
