@@ -1,6 +1,6 @@
 [project]
 name = "wraith-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "AI-native stealth browser MCP server — Browser Use + Patchright"
 readme = "README.md"
 license = { text = "MIT" }
