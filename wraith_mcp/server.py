@@ -109,12 +109,27 @@ def _llm() -> BaseChatModel:
     )
 
 
+_STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--force-color-profile=srgb",
+    "--disable-features=IsolateOrigins,site-per-process",
+]
+
+_IGNORE_DEFAULT_ARGS = [
+    "--enable-automation",
+    "--disable-extensions",
+]
+
+
 def _profile() -> BrowserProfile:
     headless = os.environ.get("HEADLESS", "true").lower() == "true"
     proxy = os.environ.get("PROXY_SERVER")
     kwargs: dict = {
         "executable_path": chromium_path(),
         "headless": headless,
+        "args": _STEALTH_ARGS,
     }
     if proxy:
         kwargs["proxy"] = {"server": proxy}
