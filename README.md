@@ -7,9 +7,7 @@ AI-native stealth browser MCP server. [Browser Use](https://github.com/browser-u
 
 ## Quick Start
 
-Just paste this to your AI agent:
-
-> Install stealth-browser-use-mcp as an MCP server, then go to https://news.ycombinator.com and extract the top 5 posts with titles and scores.
+> Add stealth-browser-use-mcp as MCP server and scrape today's top stories from news.ycombinator.com
 
 ## Install
 
