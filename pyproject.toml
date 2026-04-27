@@ -32,6 +32,9 @@ Repository = "https://github.com/Koreahwan/wraith-mcp"
 [project.scripts]
 wraith-mcp = "wraith_mcp.server:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
