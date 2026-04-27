@@ -12,7 +12,7 @@ from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.session import BrowserSession
 from langchain_core.language_models import BaseChatModel
 
-from .browser_manager import chromium_path
+from .browser_manager import apply_stealth, browser_profile_kwargs
 
 mcp = FastMCP(
     "wraith",
@@ -121,25 +121,10 @@ async def _get_session(session_id: str | None = None) -> tuple[BrowserSession, b
 
     session = BrowserSession(browser_profile=_profile())
     await session.start()
+    await apply_stealth(session)
     sid = session_id or str(id(session))
     _sessions[sid] = session
     return session, True
-
-
-_STEALTH_ARGS = [
-    "--disable-blink-features=AutomationControlled",
-    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-    "--force-color-profile=srgb",
-    "--disable-features=IsolateOrigins,site-per-process",
-    "--disable-infobars",
-    "--disable-background-timer-throttling",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding",
-    "--disable-ipc-flooding-protection",
-    "--lang=" + os.environ.get("BROWSER_LANG", "en-US"),
-    "--window-size=" + os.environ.get("BROWSER_WINDOW_SIZE", "1920,1080"),
-]
 
 
 _BLOCK_RESOURCES: frozenset[str] = frozenset(
@@ -150,20 +135,7 @@ _BLOCK_RESOURCES: frozenset[str] = frozenset(
 
 
 def _profile() -> BrowserProfile:
-    headless = os.environ.get("HEADLESS", "true").lower() == "true"
-    proxy = os.environ.get("PROXY_SERVER")
-    locale = os.environ.get("BROWSER_LOCALE", "en-US")
-    timezone = os.environ.get("BROWSER_TIMEZONE", "America/New_York")
-    kwargs: dict = {
-        "executable_path": chromium_path(),
-        "headless": headless,
-        "args": _STEALTH_ARGS,
-        "locale": locale,
-        "timezone_id": timezone,
-    }
-    if proxy:
-        kwargs["proxy"] = {"server": proxy}
-    return BrowserProfile(**kwargs)
+    return BrowserProfile(**browser_profile_kwargs())
 
 
 async def _apply_resource_blocking(session: BrowserSession) -> None:
@@ -215,6 +187,7 @@ async def browse(
     try:
         if session_id:
             session, _ = await _get_session(session_id)
+            await apply_stealth(session)
             await _apply_resource_blocking(session)
             agent = Agent(task=full_task, llm=_llm(), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
@@ -223,6 +196,7 @@ async def browse(
 
         session = BrowserSession(browser_profile=_profile())
         async with session:
+            await apply_stealth(session)
             await _apply_resource_blocking(session)
             agent = Agent(task=full_task, llm=_llm(), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
@@ -267,6 +241,7 @@ async def extract(
     try:
         if session_id:
             session, _ = await _get_session(session_id)
+            await apply_stealth(session)
             await _apply_resource_blocking(session)
             agent = Agent(task=task, llm=_llm(), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
@@ -275,6 +250,7 @@ async def extract(
 
         session = BrowserSession(browser_profile=_profile())
         async with session:
+            await apply_stealth(session)
             await _apply_resource_blocking(session)
             agent = Agent(task=task, llm=_llm(), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
@@ -317,6 +293,7 @@ async def screenshot(url: str, full_page: bool = False) -> str:
 
     session = BrowserSession(browser_profile=_profile())
     async with session:
+        await apply_stealth(session)
         task = f"Go to {url} and wait for the page to finish loading."
         agent = Agent(task=task, llm=_llm(), browser_session=session)
         async with asyncio.timeout(_TASK_TIMEOUT):
