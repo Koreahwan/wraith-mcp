@@ -1,13 +1,15 @@
 """Patchright Chromium management and browser stealth hardening."""
 
 import asyncio
+import inspect
 import os
 import random
 import re
 import subprocess
 import sys
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast, get_args, get_origin
 
 from .stealth_scripts import STEALTH_INIT_SCRIPTS
 
@@ -28,6 +30,85 @@ _DISABLE_FEATURES = (
 )
 
 _TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
+_EnvParser = Callable[[str], object]
+
+_SECURITY_POLICY_PROFILE_FIELDS = frozenset({
+    "allowed_domains",
+    "prohibited_domains",
+    "block_ip_addresses",
+})
+_COMMA_LIST_PROFILE_FIELDS = frozenset({
+    "allowed_domains",
+    "prohibited_domains",
+    "permissions",
+})
+_BOOL_PROFILE_FIELDS = frozenset({"block_ip_addresses"})
+
+
+def _comma_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _viewport(value: str) -> dict[str, int]:
+    parts = _comma_list(value)
+    if len(parts) != 2:
+        raise ValueError("BROWSER_VIEWPORT must be WIDTH,HEIGHT.")
+
+    try:
+        width = int(parts[0])
+        height = int(parts[1])
+    except ValueError as exc:
+        raise ValueError("BROWSER_VIEWPORT must use integer WIDTH,HEIGHT.") from exc
+
+    if width <= 0 or height <= 0:
+        raise ValueError("BROWSER_VIEWPORT width and height must be positive.")
+    return {"width": width, "height": height}
+
+
+def _float_value(value: str) -> float:
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Expected float BrowserProfile env value, got {value!r}.") from exc
+
+
+def _bool_value(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _TRUTHY:
+        return True
+    if normalized in _FALSY:
+        return False
+    raise ValueError(
+        f"Expected boolean BrowserProfile env value, got {value!r}. "
+        "Use one of: true, false, 1, 0, yes, no, on, off."
+    )
+
+
+_OPTIONAL_BROWSER_PROFILE_ENVS: tuple[tuple[str, str, _EnvParser], ...] = (
+    ("BROWSER_ALLOWED_DOMAINS", "allowed_domains", _comma_list),
+    ("BROWSER_PROHIBITED_DOMAINS", "prohibited_domains", _comma_list),
+    ("BROWSER_BLOCK_IP_ADDRESSES", "block_ip_addresses", _bool_value),
+    ("BROWSER_STORAGE_STATE", "storage_state", str),
+    ("BROWSER_USER_DATA_DIR", "user_data_dir", str),
+    ("BROWSER_DOWNLOADS_PATH", "downloads_path", str),
+    ("BROWSER_RECORD_HAR_PATH", "record_har_path", str),
+    ("BROWSER_RECORD_VIDEO_DIR", "record_video_dir", str),
+    ("BROWSER_TRACES_DIR", "traces_dir", str),
+    ("BROWSER_PERMISSIONS", "permissions", _comma_list),
+    ("BROWSER_VIEWPORT", "viewport", _viewport),
+    (
+        "BROWSER_MINIMUM_WAIT_PAGE_LOAD_TIME",
+        "minimum_wait_page_load_time",
+        _float_value,
+    ),
+    (
+        "BROWSER_WAIT_FOR_NETWORK_IDLE_PAGE_LOAD_TIME",
+        "wait_for_network_idle_page_load_time",
+        _float_value,
+    ),
+    ("BROWSER_WAIT_BETWEEN_ACTIONS", "wait_between_actions", _float_value),
+)
 
 
 def ensure_chromium() -> None:
@@ -67,14 +148,14 @@ def chromium_path() -> str:
     return path
 
 
-def browser_profile_kwargs() -> dict[str, Any]:
+def browser_profile_kwargs() -> dict[str, object]:
     """Return BrowserProfile keyword arguments with hardened Chromium launch args."""
     headless = os.environ.get("HEADLESS", "true").lower() == "true"
     proxy = os.environ.get("PROXY_SERVER")
     locale = os.environ.get("BROWSER_LOCALE", "en-US")
     timezone = os.environ.get("BROWSER_TIMEZONE", "America/New_York")
 
-    kwargs: dict[str, Any] = {
+    kwargs: dict[str, object] = {
         "executable_path": chromium_path(),
         "headless": headless,
         "args": stealth_launch_args(),
@@ -83,7 +164,141 @@ def browser_profile_kwargs() -> dict[str, Any]:
     }
     if proxy:
         kwargs["proxy"] = {"server": proxy}
+    _apply_optional_browser_profile_env(kwargs)
     return kwargs
+
+
+def _apply_optional_browser_profile_env(kwargs: dict[str, object]) -> None:
+    supported_fields = _browser_profile_supported_fields()
+    field_annotations = _browser_profile_field_annotations()
+
+    for env_name, field_name, parser in _OPTIONAL_BROWSER_PROFILE_ENVS:
+        raw_value = os.environ.get(env_name)
+        if raw_value is None:
+            continue
+
+        if not _browser_profile_env_supported(
+            field_name,
+            supported_fields,
+            field_annotations,
+        ):
+            if field_name in _SECURITY_POLICY_PROFILE_FIELDS:
+                raise RuntimeError(
+                    _unsupported_browser_profile_option(env_name, field_name)
+                )
+            continue
+
+        kwargs[field_name] = parser(raw_value)
+
+
+def _browser_profile_env_supported(
+    field_name: str,
+    supported_fields: frozenset[str],
+    field_annotations: dict[str, object],
+) -> bool:
+    if field_name not in supported_fields:
+        return False
+    if field_name in _COMMA_LIST_PROFILE_FIELDS:
+        return _annotation_accepts_sequence(field_annotations.get(field_name))
+    if field_name in _BOOL_PROFILE_FIELDS:
+        return _annotation_accepts_bool(field_annotations.get(field_name))
+    return True
+
+
+def _unsupported_browser_profile_option(env_name: str, field_name: str) -> str:
+    return (
+        f"{env_name} maps to BrowserProfile.{field_name}, but this Browser Use "
+        "version does not support that option shape. "
+        f"Upgrade browser-use or unset {env_name}."
+    )
+
+
+def _browser_profile_supported_fields() -> frozenset[str]:
+    return frozenset(_browser_profile_field_annotations())
+
+
+def _browser_profile_field_annotations() -> dict[str, object]:
+    browser_profile = _browser_profile_class()
+    if browser_profile is None:
+        return {}
+
+    model_fields = getattr(browser_profile, "model_fields", None)
+    if isinstance(model_fields, Mapping):
+        typed_fields = cast(Mapping[object, object], model_fields)
+        return {
+            str(name): getattr(field, "annotation", None)
+            for name, field in typed_fields.items()
+        }
+
+    try:
+        signature = inspect.signature(browser_profile)
+    except (TypeError, ValueError):
+        return {}
+
+    allowed_kinds = {
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    }
+    return {
+        name: cast(object, parameter.annotation)
+        for name, parameter in signature.parameters.items()
+        if name != "self" and parameter.kind in allowed_kinds
+    }
+
+
+def _browser_profile_class() -> type[object] | None:
+    try:
+        from browser_use.browser.profile import BrowserProfile
+    except ImportError:
+        return None
+    return BrowserProfile
+
+
+def _annotation_accepts_sequence(annotation: object) -> bool:
+    if (
+        annotation is None
+        or annotation is inspect.Signature.empty
+        or annotation is Any
+    ):
+        return True
+    if isinstance(annotation, str):
+        sequence_names = ("Any", "Collection", "Iterable", "Sequence", "list", "set")
+        return any(name in annotation for name in sequence_names)
+
+    origin = get_origin(annotation)
+    if origin in {list, set, tuple, Collection, Iterable, Sequence}:
+        return True
+
+    args = cast(tuple[object, ...], get_args(annotation))
+    if args:
+        return any(
+            arg is not type(None) and _annotation_accepts_sequence(arg)
+            for arg in args
+        )
+
+    sequence_types = (list, set, tuple, Collection, Iterable, Sequence)
+    return any(annotation is sequence_type for sequence_type in sequence_types)
+
+
+def _annotation_accepts_bool(annotation: object) -> bool:
+    if (
+        annotation is None
+        or annotation is inspect.Signature.empty
+        or annotation is Any
+    ):
+        return True
+    if isinstance(annotation, str):
+        return "bool" in annotation or "Any" in annotation
+
+    origin = get_origin(annotation)
+    if origin is bool:
+        return True
+
+    args = cast(tuple[object, ...], get_args(annotation))
+    if args:
+        return any(arg is not type(None) and _annotation_accepts_bool(arg) for arg in args)
+
+    return annotation is bool
 
 
 def stealth_launch_args() -> list[str]:
