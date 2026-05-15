@@ -16,4 +16,4 @@ ENV HEADLESS=true
 EXPOSE 8808
 
 ENTRYPOINT ["wraith-mcp"]
-CMD ["--transport", "sse", "--port", "8808"]
+CMD ["--transport", "stdio"]
