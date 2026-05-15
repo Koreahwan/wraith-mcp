@@ -2,17 +2,22 @@
 
 import asyncio
 import base64
+import inspect
 import os
 import sys
+from typing import Any
 from urllib.parse import urlparse
 
-from mcp.server.fastmcp import FastMCP
 from browser_use import Agent
 from browser_use.browser.profile import BrowserProfile
 from browser_use.browser.session import BrowserSession
-from langchain_core.language_models import BaseChatModel
+from browser_use.llm.base import BaseChatModel
+from mcp.server.fastmcp import Context, FastMCP
 
 from .browser_manager import apply_stealth, browser_profile_kwargs
+from .mcp_sampling import McpSamplingChatModel, SamplingContext, client_supports_sampling
+
+McpContext = Context[Any, Any, Any]
 
 mcp = FastMCP(
     "wraith",
@@ -33,7 +38,21 @@ _PROVIDER_DEFAULTS = {
     "openrouter": "google/gemini-2.0-flash-exp:free",
     "google": "gemini-2.0-flash",
     "ollama": "qwen3:8b",
+    "mcp-sampling": "mcp-client",
 }
+
+_API_KEY_PROVIDER_OPTIONS = (
+    "ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, "
+    "GOOGLE_API_KEY, or OLLAMA_MODEL"
+)
+
+_NO_PROVIDER_MESSAGE = (
+    "No model path is available. Wraith can run without a separate API key when "
+    "the MCP client supports sampling/createMessage, using the client's logged-in "
+    "model session through MCP. This client did not expose sampling for this tool "
+    "call. Configure a fallback provider with "
+    f"{_API_KEY_PROVIDER_OPTIONS}. Do not paste Codex login/OAuth as OPENAI_API_KEY."
+)
 
 
 def _validate_url(url: str) -> str:
@@ -51,11 +70,19 @@ def _clamp_steps(max_steps: int) -> int:
     return min(max(1, max_steps), _MAX_STEPS_LIMIT)
 
 
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 def _model(provider: str) -> str:
+    if provider == "ollama" and os.environ.get("OLLAMA_MODEL"):
+        return os.environ["OLLAMA_MODEL"]
     return os.environ.get("BROWSER_USE_MODEL", _PROVIDER_DEFAULTS[provider])
 
 
-def _check_provider() -> str | None:
+def _check_provider(ctx: SamplingContext | None = None) -> str | None:
     """Return the detected provider name, or None if none configured."""
     keys = [
         ("ANTHROPIC_API_KEY", "Anthropic"),
@@ -67,47 +94,61 @@ def _check_provider() -> str | None:
     for env, name in keys:
         if os.environ.get(env):
             return name
+    if client_supports_sampling(ctx):
+        return "MCP Sampling"
     return None
 
 
-def _llm() -> BaseChatModel:
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        from langchain_anthropic import ChatAnthropic
+def _mcp_sampling_llm(ctx: SamplingContext | None) -> BaseChatModel:
+    if ctx is None or not client_supports_sampling(ctx):
+        raise RuntimeError(_NO_PROVIDER_MESSAGE)
+    return McpSamplingChatModel(ctx=ctx, model=_model("mcp-sampling"))
 
-        return ChatAnthropic(model=_model("anthropic"))
 
-    if os.environ.get("OPENROUTER_API_KEY"):
-        from langchain_openai import ChatOpenAI
+def _llm(ctx: SamplingContext | None = None) -> BaseChatModel:
+    provider_mode = os.environ.get("WRAITH_LLM_PROVIDER", "auto").lower()
+    if provider_mode in {"mcp", "mcp-sampling", "sampling"}:
+        return _mcp_sampling_llm(ctx)
+    if provider_mode == "auto" and client_supports_sampling(ctx):
+        return _mcp_sampling_llm(ctx)
 
-        return ChatOpenAI(
-            model=_model("openrouter"),
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1",
+    if provider_mode in {"auto", "anthropic"} and os.environ.get("ANTHROPIC_API_KEY"):
+        from browser_use.llm.anthropic.chat import ChatAnthropic
+
+        return ChatAnthropic(
+            model=_model("anthropic"),
+            api_key=os.environ["ANTHROPIC_API_KEY"],
         )
 
-    if os.environ.get("OPENAI_API_KEY"):
-        from langchain_openai import ChatOpenAI
+    if provider_mode in {"auto", "openrouter"} and os.environ.get("OPENROUTER_API_KEY"):
+        from browser_use.llm.openrouter.chat import ChatOpenRouter
 
-        kwargs: dict = {"model": _model("openai")}
-        if os.environ.get("OPENAI_BASE_URL"):
-            kwargs["base_url"] = os.environ["OPENAI_BASE_URL"]
-        return ChatOpenAI(**kwargs)
+        return ChatOpenRouter(
+            model=_model("openrouter"),
+            api_key=os.environ["OPENROUTER_API_KEY"],
+        )
 
-    if os.environ.get("GOOGLE_API_KEY"):
-        from langchain_google_genai import ChatGoogleGenerativeAI
+    if provider_mode in {"auto", "openai"} and os.environ.get("OPENAI_API_KEY"):
+        from browser_use.llm.openai.chat import ChatOpenAI
 
-        return ChatGoogleGenerativeAI(model=_model("google"))
+        return ChatOpenAI(
+            model=_model("openai"),
+            api_key=os.environ["OPENAI_API_KEY"],
+            base_url=os.environ.get("OPENAI_BASE_URL"),
+        )
 
-    if os.environ.get("OLLAMA_MODEL"):
-        from langchain_ollama import ChatOllama
+    if provider_mode in {"auto", "google"} and os.environ.get("GOOGLE_API_KEY"):
+        from browser_use.llm.google.chat import ChatGoogle
 
-        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-        return ChatOllama(model=_model("ollama"), base_url=base_url)
+        return ChatGoogle(model=_model("google"), api_key=os.environ["GOOGLE_API_KEY"])
 
-    raise RuntimeError(
-        "No LLM provider configured. Set one of: "
-        "ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, or OLLAMA_MODEL"
-    )
+    if provider_mode in {"auto", "ollama"} and os.environ.get("OLLAMA_MODEL"):
+        from browser_use.llm.ollama.chat import ChatOllama
+
+        host = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        return ChatOllama(model=_model("ollama"), host=host)
+
+    raise RuntimeError(_NO_PROVIDER_MESSAGE)
 
 
 # --- Session persistence ---
@@ -135,7 +176,7 @@ _BLOCK_RESOURCES: frozenset[str] = frozenset(
 
 
 def _profile() -> BrowserProfile:
-    return BrowserProfile(**browser_profile_kwargs())
+    return BrowserProfile.model_validate(browser_profile_kwargs())
 
 
 async def _apply_resource_blocking(session: BrowserSession) -> None:
@@ -160,8 +201,9 @@ async def _apply_resource_blocking(session: BrowserSession) -> None:
         await session._cdp_add_init_script(script)
     else:
         page = await session.get_current_page()
-        if page and hasattr(page, "add_init_script"):
-            await page.add_init_script(script)
+        add_init_script = getattr(page, "add_init_script", None) if page else None
+        if callable(add_init_script):
+            await _maybe_await(add_init_script(script))
 
 
 @mcp.tool()
@@ -170,6 +212,7 @@ async def browse(
     url: str | None = None,
     max_steps: int = 25,
     session_id: str | None = None,
+    ctx: McpContext | None = None,
 ) -> str:
     """Execute a browser task described in natural language.
     The AI agent navigates and interacts with pages automatically.
@@ -193,19 +236,22 @@ async def browse(
             session, _ = await _get_session(session_id)
             await apply_stealth(session)
             await _apply_resource_blocking(session)
-            agent = Agent(task=full_task, llm=_llm(), browser_session=session)
+            agent = Agent(task=full_task, llm=_llm(ctx), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
                 result = await agent.run(max_steps=_clamp_steps(max_steps))
             return result.final_result() or "Task completed, no text result."
 
         session = BrowserSession(browser_profile=_profile())
-        async with session:
+        try:
+            await session.start()
             await apply_stealth(session)
             await _apply_resource_blocking(session)
-            agent = Agent(task=full_task, llm=_llm(), browser_session=session)
+            agent = Agent(task=full_task, llm=_llm(ctx), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
                 result = await agent.run(max_steps=_clamp_steps(max_steps))
             return result.final_result() or "Task completed, no text result."
+        finally:
+            await session.stop()
     except TimeoutError:
         raise TimeoutError(
             f"Task timed out after {_TASK_TIMEOUT}s. "
@@ -223,6 +269,7 @@ async def extract(
     data_description: str,
     max_steps: int = 15,
     session_id: str | None = None,
+    ctx: McpContext | None = None,
 ) -> str:
     """Extract structured data from a webpage using natural language.
 
@@ -247,19 +294,22 @@ async def extract(
             session, _ = await _get_session(session_id)
             await apply_stealth(session)
             await _apply_resource_blocking(session)
-            agent = Agent(task=task, llm=_llm(), browser_session=session)
+            agent = Agent(task=task, llm=_llm(ctx), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
                 result = await agent.run(max_steps=_clamp_steps(max_steps))
             return result.final_result() or "No data extracted."
 
         session = BrowserSession(browser_profile=_profile())
-        async with session:
+        try:
+            await session.start()
             await apply_stealth(session)
             await _apply_resource_blocking(session)
-            agent = Agent(task=task, llm=_llm(), browser_session=session)
+            agent = Agent(task=task, llm=_llm(ctx), browser_session=session)
             async with asyncio.timeout(_TASK_TIMEOUT):
                 result = await agent.run(max_steps=_clamp_steps(max_steps))
             return result.final_result() or "No data extracted."
+        finally:
+            await session.stop()
     except TimeoutError:
         raise TimeoutError(
             f"Task timed out after {_TASK_TIMEOUT}s. "
@@ -286,7 +336,27 @@ async def close_session(session_id: str) -> str:
 
 
 @mcp.tool()
-async def screenshot(url: str, full_page: bool = False) -> str:
+async def list_sessions() -> str:
+    """List active persistent browser session IDs."""
+    session_ids = sorted(_sessions)
+    session_list = ", ".join(session_ids) if session_ids else "none"
+    return f"Active sessions ({len(session_ids)}): {session_list}"
+
+
+@mcp.tool()
+async def close_all_sessions() -> str:
+    """Close all active persistent browser sessions."""
+    session_ids = list(_sessions)
+    for session_id in session_ids:
+        session = _sessions.pop(session_id, None)
+        if session is not None:
+            await session.stop()
+    session_list = ", ".join(session_ids) if session_ids else "none"
+    return f"Closed {len(session_ids)} session(s): {session_list}"
+
+
+@mcp.tool()
+async def screenshot(url: str, full_page: bool = False, ctx: McpContext | None = None) -> str:
     """Take a screenshot of a webpage and return it as base64-encoded PNG.
 
     Args:
@@ -296,25 +366,33 @@ async def screenshot(url: str, full_page: bool = False) -> str:
     _validate_url(url)
 
     session = BrowserSession(browser_profile=_profile())
-    async with session:
+    try:
+        await session.start()
         await apply_stealth(session)
         task = f"Go to {url} and wait for the page to finish loading."
-        agent = Agent(task=task, llm=_llm(), browser_session=session)
+        agent = Agent(task=task, llm=_llm(ctx), browser_session=session)
         async with asyncio.timeout(_TASK_TIMEOUT):
             await agent.run(max_steps=3)
             page = await session.get_current_page()
-            if hasattr(page, "screenshot"):
-                png_bytes: bytes = await page.screenshot(full_page=full_page)
+            screenshot_fn = getattr(page, "screenshot", None) if page else None
+            if callable(screenshot_fn):
+                png_bytes: bytes = await _maybe_await(screenshot_fn(full_page=full_page))
             else:
                 cdp_session = await session.get_or_create_cdp_session()
-                params = {"format": "png"}
+                params: dict[str, object] = {"format": "png"}
                 if full_page:
                     params["captureBeyondViewport"] = True
-                result = await cdp_session.cdp_client.send.Page.captureScreenshot(
-                    params=params, session_id=cdp_session.session_id
+                capture_screenshot = getattr(
+                    cdp_session.cdp_client.send.Page,
+                    "captureScreenshot",
                 )
+                result = await _maybe_await(capture_screenshot(
+                    params=params, session_id=cdp_session.session_id
+                ))
                 import base64 as b64mod
                 png_bytes = b64mod.b64decode(result["data"])
+    finally:
+        await session.stop()
     return base64.b64encode(png_bytes).decode("ascii")
 
 
@@ -325,7 +403,7 @@ def main() -> None:
     parser.add_argument(
         "--transport", choices=["stdio", "sse"], default="stdio",
     )
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8808)
     args = parser.parse_args()
 
@@ -334,13 +412,16 @@ def main() -> None:
         print(f"[wraith-mcp] LLM provider: {provider}", file=sys.stderr)
     else:
         print(
-            "[wraith-mcp] WARNING: No LLM provider configured. "
-            "Set ANTHROPIC_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, or OLLAMA_MODEL",
+            "[wraith-mcp] No API-key provider configured. "
+            "Wraith will use MCP client sampling when the connected client supports it; "
+            f"otherwise set {_API_KEY_PROVIDER_OPTIONS}.",
             file=sys.stderr,
         )
 
     if args.transport == "sse":
-        mcp.run(transport="sse", host=args.host, port=args.port)
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="sse")
     else:
         mcp.run(transport="stdio")
 
